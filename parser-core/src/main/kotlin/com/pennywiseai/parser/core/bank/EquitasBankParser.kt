@@ -61,13 +61,39 @@ class EquitasBankParser : BaseIndianBankParser() {
         val isCredit = lowerMessage.contains("credited")
 
         if (isDebit) {
-            // Pattern for UPI debit: "to MERCHANT_NAME." or "to MERCHANT_NAME. Avl"
-            // Look for "to" after the date pattern (on DD-MM-YY)
-            val toPattern = Regex(
-                """on\s+\d{2}-\d{2}-\d{2}\s+to\s+([^.]+?)(?:\.\s*Avl|\.\s*Not|\.Not|\.$)""",
+            // Pattern 1: "... to MERCHANT_NAME on DD-MM-YY..."
+            // e.g. "INR 978.00 debited from Equitas-1511 via UPI -Ref:630334537301 to Zomato Media Pri on 30-10-26.Bal..."
+            val toBeforeDatePattern = Regex(
+                """(?:-?Ref[:\s]*[A-Z0-9]+\s+)?to\s+([^.]+?)\s+on\s+\d{2}[-/]\d{2}[-/]\d{2,4}""",
                 RegexOption.IGNORE_CASE
             )
-            toPattern.find(message)?.let { match ->
+            toBeforeDatePattern.find(message)?.let { match ->
+                val merchant = cleanMerchantName(match.groupValues[1].trim())
+                if (isValidMerchantName(merchant)) {
+                    return merchant
+                }
+            }
+
+            // Pattern 2: "... on DD-MM-YY to MERCHANT_NAME."
+            // e.g. "INR 500.00 debited via UPI from Equitas A/c 1234 -Ref:571987071234 on 19-12-25 to JOHN DOE. Avl Bal..."
+            val toAfterDatePattern = Regex(
+                """on\s+\d{2}[-/]\d{2}[-/]\d{2,4}\s+to\s+([^.]+?)(?:\.\s*Avl|\.\s*Bal|\.\s*Not|\.Not|\.$)""",
+                RegexOption.IGNORE_CASE
+            )
+            toAfterDatePattern.find(message)?.let { match ->
+                val merchant = cleanMerchantName(match.groupValues[1].trim())
+                if (isValidMerchantName(merchant)) {
+                    return merchant
+                }
+            }
+
+            // Pattern 3: "towards MERCHANT_NAME on DD-MM-YY"
+            // e.g. "debited from Equitas A/c 1511 towards Debit card AMC + GST:221026/266007612 on 23-10-26."
+            val towardsPattern = Regex(
+                """towards\s+([^.]+?)\s+on\s+\d{2}[-/]\d{2}[-/]\d{2,4}""",
+                RegexOption.IGNORE_CASE
+            )
+            towardsPattern.find(message)?.let { match ->
                 val merchant = cleanMerchantName(match.groupValues[1].trim())
                 if (isValidMerchantName(merchant)) {
                     return merchant
@@ -77,11 +103,23 @@ class EquitasBankParser : BaseIndianBankParser() {
 
         if (isCredit) {
             // Pattern for UPI credit: "on DD-MM-YY from SENDER_NAME. Avl"
-            val fromPattern = Regex(
-                """on\s+\d{2}-\d{2}-\d{2}\s+from\s+([^.]+?)(?:\.\s*Avl|\.\s*Not|\.Not|\.$)""",
+            val fromAfterDatePattern = Regex(
+                """on\s+\d{2}[-/]\d{2}[-/]\d{2,4}\s+from\s+([^.]+?)(?:\.\s*Avl|\.\s*Bal|\.\s*Not|\.Not|\.$)""",
                 RegexOption.IGNORE_CASE
             )
-            fromPattern.find(message)?.let { match ->
+            fromAfterDatePattern.find(message)?.let { match ->
+                val merchant = cleanMerchantName(match.groupValues[1].trim())
+                if (isValidMerchantName(merchant)) {
+                    return merchant
+                }
+            }
+
+            // Pattern for credit: "from SENDER_NAME on DD-MM-YY"
+            val fromBeforeDatePattern = Regex(
+                """from\s+([^.]+?)\s+on\s+\d{2}[-/]\d{2}[-/]\d{2,4}""",
+                RegexOption.IGNORE_CASE
+            )
+            fromBeforeDatePattern.find(message)?.let { match ->
                 val merchant = cleanMerchantName(match.groupValues[1].trim())
                 if (isValidMerchantName(merchant)) {
                     return merchant
@@ -89,7 +127,7 @@ class EquitasBankParser : BaseIndianBankParser() {
             }
         }
 
-        // Check for UPI pattern
+        // Check for UPI pattern fallback only if no merchant could be extracted
         if (message.contains("via UPI", ignoreCase = true)) {
             return "UPI Transaction"
         }
@@ -98,23 +136,24 @@ class EquitasBankParser : BaseIndianBankParser() {
     }
 
     override fun extractAccountLast4(message: String): String? {
-        super.extractAccountLast4(message)?.let { return it }
-        // Pattern: "Equitas A/c 12XX" or "A/c XX1234"
-        val acPattern = Regex(
-            """(?:Equitas\s+)?A/c\s+([X\d]+)""",
-            RegexOption.IGNORE_CASE
+        // Pattern 1: "Equitas-1511", "Equitas A/c 12XX", or "A/c 1511"
+        val acPatterns = listOf(
+            Regex("""Equitas-([X\d]+)""", RegexOption.IGNORE_CASE),
+            Regex("""(?:Equitas\s+)?A/c\s+([X\d]+)""", RegexOption.IGNORE_CASE)
         )
-        acPattern.find(message)?.let { match ->
-            return extractLast4Digits(match.groupValues[1])
+        for (pattern in acPatterns) {
+            pattern.find(message)?.let { match ->
+                extractLast4Digits(match.groupValues[1])?.let { return it }
+            }
         }
 
-        return null
+        return super.extractAccountLast4(message)
     }
 
     override fun extractBalance(message: String): BigDecimal? {
-        // Pattern: "Avl Bal is INR XX,XXX.XX" or "Avl Bal is INR XXXXX"
+        // Pattern: "Avl Bal is INR XX,XXX.XX", "Avl Bal is INR XXXXX", or "Bal INR XX,XXX.XX"
         val balancePattern = Regex(
-            """Avl\s+Bal\s+is\s+INR\s+([0-9,]+(?:\.\d{2})?)""",
+            """(?:Avl\s+Bal\s+is|Bal)\s+INR\s+([0-9,]+(?:\.\d{2})?)""",
             RegexOption.IGNORE_CASE
         )
         balancePattern.find(message)?.let { match ->
